@@ -17,6 +17,9 @@
 //    como entregue, e as seguintes da mesma rodada vão em seguida, na ordem, sem esperar. Assim a rodada nunca
 //    passa de uns poucos segundos: a presença (10 s no servidor) e a confirmação (30 s) não vencem por uma
 //    sessão ocupada. O preço: um hook que recuse a mensagem depois desses 2 s não chega ao escritório.
+//    Texto que começa com `/` não é prompt (o Claude Code recusa): `/clear` (ou `/reset`, `/new`) e `/compact
+//    [instruções]` vão por `$.command.run`, com o mesmo prazo; qualquer outro comando falha com o motivo. A lista é
+//    fechada (SLASH_COMMANDS): pelo escritório dá para limpar o contexto, não mexer na configuração da sessão.
 // 3. Um único POST /api/mod/inbox/ack com {session, results: [{id, ok, error?}]}. Sem mensagens, sem ack.
 //
 // Por que um plugin à parte do mod `habblaud`: aquele só observa (uso do plano, aviso embaixo do prompt,
@@ -25,7 +28,7 @@
 //
 // Regras: nenhum hook lança (um hook que lança é pulado, mas o que ele deixou pela metade fica): cada passo tem seu
 // try/catch e falha = silêncio. Uma rodada por vez (um Habblaud lento não acumula perguntas). Nada de $.process,
-// $.model, $.fs, leitura da conversa nem decisão de ferramenta; a rede é só 127.0.0.1. O estado fica em variáveis
+// $.model, $.fs, leitura da conversa nem decisão de ferramenta; comandos, só os da lista; a rede é só 127.0.0.1. O estado fica em variáveis
 // do módulo: um hot reload recomeça do zero (uma mensagem buscada e não confirmada falha no servidor em 30 s).
 // O Claude Code pode carregar o plugin de uma cópia só dele: os ajudantes de caminho são cópias dos de
 // mod/habblaud/hooks/register.ts, não importações.
@@ -58,6 +61,31 @@ export interface AckResult {
   id: string
   ok: boolean
   error?: string
+}
+
+/**
+ * Comandos que dá para mandar pelo escritório (`/clear`, `/compact ...`). O Claude Code recusa um prompt que comece
+ * com `/` ("would run a command as the user"): esses vão por `$.command.run`. A lista é fechada de propósito: quem
+ * escreve no escritório não ganha todos os comandos da sessão (/permissions, /config, /login...), só limpar e compactar
+ * o contexto. `/reset` e `/new` são os outros nomes do `/clear`.
+ */
+export const SLASH_COMMANDS = ['clear', 'compact'] as const
+export type SlashCommand = (typeof SLASH_COMMANDS)[number]
+const SLASH_ALIASES: Readonly<Record<string, SlashCommand>> = { clear: 'clear', reset: 'clear', new: 'clear', compact: 'compact' }
+
+/** O que um texto que começa com `/` pede: um comando da lista, um fora dela, ou undefined (não é comando). */
+export type SlashRequest = { command: SlashCommand; args: string } | { refused: string } | undefined
+
+/** Texto (sem espaços nas pontas) que começa com `/`: o comando e o resto como argumentos. */
+export function slashRequestOf(text: string): SlashRequest {
+  const t = text.trim()
+  if (!t.startsWith('/')) return undefined
+  const m = /^\/(\S*)\s*([\s\S]*)$/.exec(t)
+  const name = (m?.[1] ?? '').toLowerCase()
+  const command = SLASH_ALIASES[name]
+  if (!command) return { refused: `/${name.slice(0, 40)}` }
+  // /clear não leva argumentos; /compact leva as instruções do resumo.
+  return { command, args: command === 'compact' ? (m?.[2] ?? '').trim() : '' }
 }
 
 /** Desfecho de um `$.prompt.submit`. */
@@ -232,6 +260,25 @@ async function submitOne($: EngineInterface, text: string): Promise<Submitted> {
   }
 }
 
+/** Um comando da lista, como se você o tivesse digitado (cada um escrito por extenso, como a análise exige). Nunca lança. */
+async function runCommand($: EngineInterface, command: SlashCommand, args: string): Promise<Submitted> {
+  try {
+    if (command === 'clear') await $.command.run({ command: 'clear' })
+    else await $.command.run({ command: 'compact', args })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: reasonText(err, `a sessão não rodou /${command}`) }
+  }
+}
+
+/** Uma mensagem: comando da lista (`/clear`, `/compact`), comando fora dela (falha) ou prompt. Nunca lança. */
+function deliverOne($: EngineInterface, text: string): Promise<Submitted> {
+  const slash = slashRequestOf(text)
+  if (!slash) return submitOne($, text)
+  if ('refused' in slash) return Promise.resolve({ ok: false, error: `${slash.refused}: pelo escritório só dá para mandar /${SLASH_COMMANDS.join(', /')}` })
+  return runCommand($, slash.command, slash.args)
+}
+
 /** Manda as mensagens à sessão, na ordem, e devolve o resultado de cada uma. Nunca lança. */
 async function deliver($: EngineInterface, messages: readonly InboxMessage[]): Promise<AckResult[]> {
   const results: AckResult[] = []
@@ -242,7 +289,7 @@ async function deliver($: EngineInterface, messages: readonly InboxMessage[]): P
       results.push({ id: m.id, ok: false, error: 'mensagem vazia' })
       continue
     }
-    const submitted = submitOne($, m.text)
+    const submitted = deliverOne($, m.text)
     if (queued) {
       void submitted
       results.push({ id: m.id, ok: true })

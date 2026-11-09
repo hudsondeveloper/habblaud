@@ -10,6 +10,14 @@ do meio (0.**3**.0).
 
 ## [Não lançado]
 
+### Adicionado
+
+- **`/clear` e `/compact` pela caixa de mensagem do agente.** Mandar `/clear` (ou `/reset`, `/new`) pelo escritório
+  limpa o contexto da sessão, e `/compact [instruções]` compacta a conversa. Antes, qualquer mensagem começando com
+  `/` voltava como "Não foi entregue", porque o Claude Code não aceita comandos como prompt. Só esses dois comandos
+  passam: os outros (`/permissions`, `/config`, `/login`...) continuam recusados, para quem escreve no escritório não
+  mexer na configuração da sessão. Para valer, rode `npm run mod:install` e `/reload-plugins` nas sessões abertas.
+
 ### Segurança
 
 - **O que age sobre as sessões só vale vindo de fato do próprio computador.** O terminal, responder pedidos de

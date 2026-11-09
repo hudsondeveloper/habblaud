@@ -4,7 +4,7 @@
 // servidor) e o prompt.submit de baixo (a sessão: aceita, um hook recusa, a chamada lança ou fica presa).
 import type { HttpResponse, On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { accountIdOf, ackBody, configDirOf, inboxBody, MAX_REASON, normalizePath, parseInbox, portOf, reasonText, type InboxMessage } from '../hooks/register'
+import { accountIdOf, ackBody, configDirOf, inboxBody, MAX_REASON, normalizePath, parseInbox, portOf, reasonText, slashRequestOf, type InboxMessage } from '../hooks/register'
 
 const NOW = Date.parse('2026-10-09T12:00:00Z')
 const PORT = '4850'
@@ -26,6 +26,8 @@ interface World {
   ack?: () => 'ok' | 'offline' | 'hang'
   /** Padrão: 'ok'. */
   fate?: (text: string) => Fate
+  /** O command.run de baixo lança. */
+  commandFails?: boolean
 }
 
 interface Sent {
@@ -81,10 +83,17 @@ function world(on: On, w: World = {}) {
     if (fate === 'hang') await clock.sleep(60_000)
     return { text: e.text }
   })
+  const commands: Array<{ command: string; args: string }> = []
+  on('command.run', async ($, e) => {
+    commands.push({ command: e.command, args: e.args })
+    if (w.commandFails) throw new Error('não deu')
+    return {}
+  })
   return {
     clock,
     sent,
     submits,
+    commands,
     inboxes: () => sent.filter((s) => s.url === INBOX_URL),
     acks: () => sent.filter((s) => s.url === ACK_URL),
     texts: () => submits.map((s) => s.text),
@@ -149,6 +158,43 @@ describe('rodadas', () => {
         { id: 'e', ok: false, error: 'mensagem vazia' },
       ],
     })
+  })
+
+  test('/clear (e /reset, /new) e /compact vão por command.run; outro comando falha sem chegar à sessão', async ($, on) => {
+    const w = world(on, {
+      inbox: batches([
+        { id: 'c1', text: ' /clear ' },
+        { id: 'c2', text: '/NEW' },
+        { id: 'c3', text: '/compact foca no bug do login\ne nos testes' },
+        { id: 'c4', text: '/permissions' },
+        { id: 'c5', text: 'depois: roda os testes' },
+      ]),
+    })
+    await $.session.start(START)
+    await w.clock.advance(2_000)
+    expect(w.commands).toEqual([
+      { command: 'clear', args: '' },
+      { command: 'clear', args: '' },
+      { command: 'compact', args: 'foca no bug do login\ne nos testes' },
+    ])
+    expect(w.texts()).toEqual(['depois: roda os testes'])
+    expect(w.acks()[0]?.body).toEqual({
+      session: 'sess-1',
+      results: [
+        { id: 'c1', ok: true },
+        { id: 'c2', ok: true },
+        { id: 'c3', ok: true },
+        { id: 'c4', ok: false, error: expect.stringContaining('/permissions') },
+        { id: 'c5', ok: true },
+      ],
+    })
+  })
+
+  test('comando que a sessão não roda vira falha com o motivo', async ($, on) => {
+    const w = world(on, { inbox: batches([{ id: 'c1', text: '/clear' }]), commandFails: true })
+    await $.session.start(START)
+    await w.clock.advance(2_000)
+    expect(w.acks()[0]?.body).toEqual({ session: 'sess-1', results: [{ id: 'c1', ok: false, error: expect.stringMatching(/\S/) }] })
   })
 
   test('sessão ocupada: passou de 2 s, conta como entregue e as seguintes vão em seguida, na ordem; as rodadas seguem', async ($, on) => {
@@ -271,6 +317,15 @@ describe('funções puras', () => {
       { id: 'a', text: ' x\n' },
       { id: 'b', text: '' },
     ])
+  })
+
+  test('comando: só os da lista, com /reset e /new valendo /clear; texto comum não é comando', () => {
+    expect(slashRequestOf('roda /clear depois')).toBeUndefined()
+    expect(slashRequestOf('  /clear  ')).toEqual({ command: 'clear', args: '' })
+    expect(slashRequestOf('/reset agora')).toEqual({ command: 'clear', args: '' })
+    expect(slashRequestOf('/compact  resume o plano ')).toEqual({ command: 'compact', args: 'resume o plano' })
+    expect(slashRequestOf('/login')).toEqual({ refused: '/login' })
+    expect(slashRequestOf('/')).toEqual({ refused: '/' })
   })
 
   test('corpos das duas rotas', () => {

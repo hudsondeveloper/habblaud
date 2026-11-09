@@ -10,7 +10,7 @@ import { checkMessage, dictationRound, filesRound, httpPost, parseArgs, round, s
 import { spawnUrl } from '../spawn/spawn';
 import { AccountsService } from '../accounts/service';
 import { createApiHandler } from '../http/app';
-import { createRequestGuard } from '../http/guard';
+import { createRequestGuard, isLoopbackAddress } from '../http/guard';
 import { Hub } from '../http/sse';
 import { setQuiet } from '../log';
 import { createCodexQueueRunner } from '../messages/codex';
@@ -59,7 +59,7 @@ async function serve(enabled = true): Promise<{ base: string; port: number; offi
   late.registry = registry;
   registry?.start();
   const accounts = new AccountsService({ dirs: [], home: tmp.dir, env: {}, onChange: () => {} });
-  const api = createApiHandler({ office, hub, accounts, sources: () => [], version: 't', inDocker: true, terminal: true, messages: registry ? createMessageRoutes(registry) : undefined });
+  const api = createApiHandler({ office, hub, accounts, sources: () => [], version: 't', inDocker: true, localPeer: isLoopbackAddress, terminal: true, messages: registry ? createMessageRoutes(registry) : undefined });
   const guard = createRequestGuard({ allowedHosts: new Set(['habblaud.lan']) });
   const server = http.createServer((req, res) => {
     if (guard(req, res)) return;

@@ -144,9 +144,13 @@ export function folderProblem(folder: string, stat: (p: string) => { isDirectory
   }
 }
 
-/** `open`/`xdg-open`/`start` sem shell. */
+/**
+ * `open`/`xdg-open`/o tratador de protocolos do Windows, sem shell. No Windows nada de `cmd /c start`: o cmd.exe
+ * cortaria o link no `&` (e rodaria o resto como comandos) e expandiria `%VAR%`; o rundll32 recebe o link inteiro.
+ */
 export function createOpener(platform: NodeJS.Platform = process.platform, timeoutMs = OPEN_TIMEOUT_MS): Opener {
-  const [bin, pre] = platform === 'darwin' ? ['open', []] : platform === 'win32' ? ['cmd', ['/c', 'start', '""']] : ['xdg-open', []];
+  const [bin, pre] =
+    platform === 'darwin' ? ['open', []] : platform === 'win32' ? ['rundll32.exe', ['url.dll,FileProtocolHandler']] : ['xdg-open', []];
   return (url) =>
     new Promise((ok) => {
       execFile(bin, [...pre, url], { timeout: timeoutMs, windowsHide: true, encoding: 'utf8' }, (err, _out, stderr) => {

@@ -1,4 +1,5 @@
 // Rotas da API (/api/*). Respostas JSON; rotas desconhecidas -> 404 JSON.
+import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { NAME_MAX, parseAppearanceParts, parseCharacterName, parseSeed } from '../../shared/appearance';
 import type { AccessInfo, AgentInfo, ModSummary, OfficeSnapshot, SourceInfo, UpdateStatus } from '../../shared/types';
@@ -8,7 +9,7 @@ import type { DayStatsService } from '../history/daystats';
 import type { Office } from '../model/office';
 import type { CodexLive } from '../sources/codex/live';
 import type { SessionLookup } from '../sources/source';
-import { isJsonContentType, isLoopbackHost } from './guard';
+import { isJsonContentType, isLocalRequest, localPeerCheck, type PeerCheck } from './guard';
 import type { RemoteFeature } from './remote';
 import { handleSessionsRoute } from './sessions';
 import type { Hub } from './sse';
@@ -94,6 +95,11 @@ export interface ApiDeps {
    * local com Host local: pela porta do celular, nem com login (403 `local_only`).
    */
   world?: (req: IncomingMessage, res: ServerResponse, url: URL) => void;
+  /**
+   * Quem conta como conexão do próprio computador (guard.ts, localPeerCheck). Padrão: o loopback fora do Docker; no
+   * Docker, o gateway da rede do container (lido de /proc/net/route).
+   */
+  localPeer?: PeerCheck;
 }
 
 /** GET /api/agents/:id/terminal (ids nunca contêm '/'). */
@@ -104,13 +110,6 @@ const AGENT_ACTION_ROUTE = /^\/api\/agents\/[^/]+\/(stop|takeover)$/;
 /** PUT|DELETE /api/agents/:id/character: personagem do projeto (ver Office.setCharacter). */
 const CHARACTER_ROUTE = /^\/api\/agents\/([^/]+)\/character$/;
 const NOT_EDITABLE = tr('agente não encontrado: só o agente principal de uma sessão aberta tem personagem editável');
-
-/** Conexão vinda do próprio computador (127.x, ::1 ou ::ffff:127.x). */
-function isLoopbackAddress(addr: string | undefined): boolean {
-  if (!addr) return false;
-  const a = addr.replace(/^::ffff:/i, '');
-  return a === '::1' || /^127\./.test(a);
-}
 
 /** Rotas das mensagens pelo escritório (server/messages/http.ts); /api/mod/summary fica de fora (sem trava). */
 /**
@@ -265,12 +264,15 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
   const terminals = deps.terminal ? deps.terminals : undefined;
 
   const isRemote = (req: IncomingMessage): boolean => !!deps.remote?.is(req);
+  const peer = deps.localPeer ?? localPeerCheck(deps.inDocker, () => readFileSync('/proc/net/route', 'utf8'));
+  /** Pela porta local, com Host local, sem proxy e conectado do próprio computador (guard.ts, isLocalRequest). */
+  const isLocal = (req: IncomingMessage): boolean => !isRemote(req) && isLocalRequest(req, peer);
   /**
-   * A trava "pelo próprio computador": na porta local, o Host precisa ser loopback (como antes); na porta remota, só o
-   * que HABBLAUD_REMOTE_ALLOW liberar (`feature` ausente = nunca pela porta remota).
+   * A trava "pelo próprio computador": na porta local, isLocal; na porta remota, só o que HABBLAUD_REMOTE_ALLOW liberar
+   * (`feature` ausente = nunca pela porta remota).
    */
   const trusted = (req: IncomingMessage, feature?: RemoteFeature): boolean =>
-    isRemote(req) ? !!feature && !!deps.remote?.allows(feature) : isLoopbackHost(req.headers.host);
+    isRemote(req) ? !!feature && !!deps.remote?.allows(feature) : isLocal(req);
   const denied = (req: IncomingMessage, localMessage: string): string =>
     isRemote(req) ? tr('não liberado no acesso remoto (veja HABBLAUD_REMOTE_ALLOW)') : localMessage;
 
@@ -344,7 +346,7 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       if (!deps.world) {
         req.resume();
         sendJson(res, 404, { error: tr('rota desconhecida') });
-      } else if (isRemote(req) || !isLoopbackHost(req.headers.host)) {
+      } else if (!isLocal(req)) {
         req.resume();
         sendJson(res, 403, { error: { code: 'local_only', message: tr('o Habblaud World só é usado pelo próprio computador (http://localhost)') } });
       } else deps.world(req, res, url);
@@ -393,12 +395,12 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
         const remote = isRemote(req);
         const access: AccessInfo = {
           remote,
-          local: !remote && isLoopbackHost(req.headers.host),
+          local: isLocal(req),
           permissions: !!deps.permissions && trusted(req, 'permissions'),
           messages: !!deps.messages && trusted(req, 'messages'),
           terminal: !!terminals && trusted(req, 'terminal'),
           spawn: !!deps.spawn && trusted(req, 'spawn'),
-          world: !!deps.world && !!deps.terminal && !remote && isLoopbackHost(req.headers.host),
+          world: !!deps.world && !!deps.terminal && isLocal(req),
         };
         sendJson(res, 200, access);
       }
@@ -437,6 +439,7 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
         history: deps.terminal ? deps.sessions : undefined,
         terminals,
         trusted: isRemote(req) ? trusted(req, 'terminal') : undefined,
+        local: isLocal(req),
       });
       return true;
     }
@@ -480,11 +483,10 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       return true;
     }
     if (path === '/api/codex/events') {
-      // Eventos dos hooks do Codex: só observam, mas só valem vindos do próprio computador. Fora do Docker o hook
-      // sempre conecta pelo loopback (o Host sozinho um cliente da rede consegue imitar); no Docker ele chega pela porta
-      // publicada, com o endereço do gateway.
+      // Eventos dos hooks do Codex: só observam, mas só valem vindos do próprio computador (trusted confere quem conectou:
+      // o loopback fora do Docker; no Docker, o gateway, por onde chega a porta publicada).
       if (method !== 'POST') methodNotAllowed(res, 'POST');
-      else if (!trusted(req) || (!deps.inDocker && !isLoopbackAddress(req.socket.remoteAddress))) {
+      else if (!trusted(req)) {
         sendJson(res, 403, { error: denied(req, tr('eventos do Codex só são aceitos pelo próprio computador (http://localhost ou http://127.0.0.1)')) });
       } else handleCodexEvent(req, res, { live: deps.codexLive, entries: () => accounts.entriesOf('codex') }).catch((err) => fail(res, err));
       return true;
@@ -573,11 +575,11 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       return true;
     }
     if (path === '/api/host/files/poll' || path === '/api/host/files/ack') {
-      // Só o auxiliar do host, pela porta local (nunca pela remota); fora do Docker, só pelo loopback.
+      // Só o auxiliar do host, pela porta local (nunca pela remota), conectado do próprio computador (trusted).
       const files = deps.files;
       if (method !== 'POST') methodNotAllowed(res, 'POST');
       else if (!files) sendJson(res, 403, { error: tr('arquivos desligados') });
-      else if (!trusted(req) || (!deps.inDocker && !isLoopbackAddress(req.socket.remoteAddress))) {
+      else if (!trusted(req)) {
         sendJson(res, 403, { error: denied(req, tr('só o auxiliar do próprio computador')) });
       } else if (path === '/api/host/files/poll') {
         req.resume();
@@ -593,11 +595,11 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       return true;
     }
     if (path === '/api/host/dictation/poll' || path === '/api/host/dictation/ack') {
-      // Só o auxiliar do host, pela porta local (nunca pela remota); fora do Docker, só pelo loopback.
+      // Só o auxiliar do host, pela porta local (nunca pela remota), conectado do próprio computador (trusted).
       const dictation = deps.dictation;
       if (method !== 'POST') methodNotAllowed(res, 'POST');
       else if (!dictation) sendJson(res, 403, { error: tr('ditado desligado') });
-      else if (!trusted(req) || (!deps.inDocker && !isLoopbackAddress(req.socket.remoteAddress))) {
+      else if (!trusted(req)) {
         sendJson(res, 403, { error: denied(req, tr('só o auxiliar do próprio computador')) });
       } else if (path === '/api/host/dictation/poll') {
         req.resume();
@@ -613,11 +615,11 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       return true;
     }
     if (path === '/api/host/spawn/poll' || path === '/api/host/spawn/ack') {
-      // Só o auxiliar do host, pela porta local (nunca pela remota); fora do Docker, só pelo loopback.
+      // Só o auxiliar do host, pela porta local (nunca pela remota), conectado do próprio computador (trusted).
       const spawn = deps.spawn;
       if (method !== 'POST') methodNotAllowed(res, 'POST');
       else if (!spawn) sendJson(res, 403, { error: tr('novo agente pelo escritório desligado') });
-      else if (!trusted(req) || (!deps.inDocker && !isLoopbackAddress(req.socket.remoteAddress))) {
+      else if (!trusted(req)) {
         sendJson(res, 403, { error: denied(req, tr('só o auxiliar do próprio computador')) });
       } else if (path === '/api/host/spawn/poll') {
         req.resume();

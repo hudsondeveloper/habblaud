@@ -2,13 +2,14 @@
 // mantém o modelo do escritório e transmite via SSE. Sem dependências de runtime.
 //   npm run dev    -> tsx server/index.ts --dev (Vite em middleware mode, HMR no mesmo servidor)
 //   npm start      -> node dist/server/index.js (serve dist/client)
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import { join } from 'node:path';
 import { codexDirsRefused, isDefaultDir } from './accounts/detect';
 import { AccountsService } from './accounts/service';
 import { isTruthy, loadConfig, messagesOffReason, terminalOffReason, worldSocketUrl } from './config';
 import { createApiHandler, sendJson } from './http/app';
-import { createRequestGuard, isLoopbackHost } from './http/guard';
+import { createRequestGuard, defaultGateways, isLocalRequest, localPeerCheck } from './http/guard';
 import { createRemoteGate, isRemoteRequest, loadSecret, RemoteSessions, startRemoteListener, type RemoteListener } from './http/remote';
 import { Hub } from './http/sse';
 import { createStaticHandler } from './http/static';
@@ -143,9 +144,22 @@ if (codex) agents.add(codex);
 const codexLive: CodexLive | undefined = codex;
 late.office = office;
 late.agents = agents;
-// Página que pode responder pelo escritório: Host local na porta local; na remota, só com permissions liberado.
+// Quem conta como "o próprio computador" (http/guard.ts): o loopback; no Docker, o gateway da rede do container.
+const routeTable = (): string => readFileSync('/proc/net/route', 'utf8');
+const localPeer = localPeerCheck(config.inDocker, routeTable);
+const readRoutes = (): string => {
+  try {
+    return routeTable();
+  } catch {
+    return '';
+  }
+};
+if (config.inDocker && !defaultGateways(readRoutes()).size) {
+  log.warn(tr('Não consegui ler o gateway do container em /proc/net/route: o terminal, as permissões e as mensagens ficam travados.'));
+}
+// Página que pode responder pelo escritório: pedido local na porta local; na remota, só com permissions liberado.
 const hub = new Hub(office, {
-  canAnswer: (req) => (isRemoteRequest(req) ? !!config.remote?.allow.has('permissions') : isLoopbackHost(req.headers.host)),
+  canAnswer: (req) => (isRemoteRequest(req) ? !!config.remote?.allow.has('permissions') : isLocalRequest(req, localPeer)),
 });
 // "Meu dia": amostra o escritório a cada segundo e persiste em <dataDir>/stats/ (ver history/daystats.ts).
 const stats = new DayStatsService({ dir: join(config.dataDir, 'stats'), snapshot: () => hub.current() });
@@ -352,6 +366,7 @@ const api = createApiHandler({
   sources: () => agents.sources(),
   version: config.version,
   inDocker: config.inDocker,
+  localPeer,
   terminal: config.terminal,
   terminals,
   sessions: history,

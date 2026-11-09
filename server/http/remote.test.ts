@@ -9,7 +9,7 @@ import { NameStore } from '../model/names';
 import { Office } from '../model/office';
 import { tempDir } from '../test/fixtures';
 import { createApiHandler, sendJson } from './app';
-import { createRequestGuard, isLoopbackHost } from './guard';
+import { createRequestGuard, isLoopbackAddress, isLoopbackHost } from './guard';
 import {
   COOKIE,
   createRemoteGate,
@@ -207,6 +207,8 @@ async function start(allow: RemoteFeature[] = ['permissions']): Promise<Harness>
     sources: () => [],
     version: '9.9.9',
     inDocker: true,
+    // O teste conecta por 127.0.0.1: faz o papel do gateway do container (a porta publicada no host).
+    localPeer: isLoopbackAddress,
     terminal: true,
     spawn,
     permissions: (req, res, path) => {

@@ -10,21 +10,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PtyError, type PtyManager } from '../pty/manager';
 import { HttpError, readJson, sendJson } from './app';
-import { isLoopbackHost } from './guard';
+import { hasProxyHeaders, isLoopbackAddress, isLoopbackHost } from './guard';
 import { tr } from '../../shared/i18n';
 
 /** /api/agents/:id/(stop|takeover) (ids nunca contêm '/'). */
 const AGENT_ACTION_ROUTE = /^\/api\/agents\/([^/]+)\/(stop|takeover)$/;
 
-function isLoopbackAddress(addr: string | undefined): boolean {
-  if (!addr) return false;
-  const a = addr.startsWith('::ffff:') ? addr.slice(7) : addr;
-  return a === '::1' || a.startsWith('127.');
-}
-
 /** Motivo da recusa, ou null. */
 export function ptyRequestProblem(req: IncomingMessage): string | null {
-  if (!isLoopbackAddress(req.socket.remoteAddress)) return tr('o terminal interativo só pode ser usado no próprio computador');
+  // Um proxy ou túnel no próprio computador também conecta pelo loopback: com os cabeçalhos dele, não vale.
+  if (!isLoopbackAddress(req.socket.remoteAddress) || hasProxyHeaders(req)) return tr('o terminal interativo só pode ser usado no próprio computador');
   const host = req.headers.host;
   if (!isLoopbackHost(host)) return tr('abra o Habblaud por http://localhost para usar o terminal interativo');
   const origin = req.headers.origin;

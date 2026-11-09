@@ -3,7 +3,8 @@
 // 1) DNS rebinding: um site malicioso pode fazer o próprio domínio resolver para 127.0.0.1 e,
 //    assim, ler /api/snapshot "como se fosse a mesma origem". O navegador manda o cabeçalho Host
 //    com o domínio do atacante, então só aceitamos Host que seja um IP literal, `localhost`
-//    (ou `*.localhost`) ou um nome liberado em HABBLAUD_ALLOWED_HOSTS.
+//    (ou `*.localhost`) ou um nome liberado em HABBLAUD_ALLOWED_HOSTS. O que age sobre as sessões
+//    exige mais (isLocalRequest): Host exato, sem proxy e a conexão vinda do próprio computador.
 // 2) CSRF: requisições que mudam estado (POST) exigem `Content-Type: application/json` — o que um
 //    formulário ou um fetch "simples" de outro site não consegue enviar sem preflight de CORS, que
 //    este servidor nunca autoriza — e, quando há `Origin`, ele precisa ser da mesma origem ou local.
@@ -40,20 +41,88 @@ export function hostnameOf(value: string | undefined): string | undefined {
   return m ? m[1].replace(/\.$/, '') : undefined;
 }
 
+/** Nome que os navegadores resolvem sempre para o loopback: `localhost`, `*.localhost`, 127.x ou ::1. */
 function isLoopbackName(name: string): boolean {
-  if (name === 'localhost' || name.endsWith('.localhost')) return true;
-  if (name === '::1') return true;
+  return name === 'localhost' || name.endsWith('.localhost') || isExactLoopbackName(name);
+}
+
+/**
+ * Só `localhost`, 127.x ou ::1, sem `*.localhost`: nem todo navegador ou sistema fixa os subdomínios no loopback, e um
+ * DNS hostil os religaria para o atacante (DNS rebinding). `*.localhost` continua abrindo a página (hostAllowed).
+ */
+function isExactLoopbackName(name: string): boolean {
+  if (name === 'localhost' || name === '::1') return true;
   return isIP(name) === 4 && name.startsWith('127.');
 }
 
 /**
- * Cabeçalho Host local (`localhost`, `*.localhost`, 127.x ou `[::1]`; porta ignorada)? Usado pelo terminal, pelas
- * permissões e pelas mensagens, que só atendem quem abriu o Habblaud pelo próprio computador: um IP da rede ou um nome
- * de HABBLAUD_ALLOWED_HOSTS (proxy, túnel) não serve. Ausente ou inválido: false.
+ * Cabeçalho Host local (`localhost`, 127.x ou `[::1]`; porta ignorada)? Parte da trava de quem age sobre as sessões
+ * (ver isLocalRequest): um IP da rede, `*.localhost` ou um nome de HABBLAUD_ALLOWED_HOSTS (proxy, túnel) não serve.
+ * Ausente ou inválido: false.
  */
 export function isLoopbackHost(host: string | undefined): boolean {
   const name = hostnameOf(host);
-  return !!name && isLoopbackName(name);
+  return !!name && isExactLoopbackName(name);
+}
+
+/** Conexão vinda do próprio computador (127.x, ::1 ou ::ffff:127.x). */
+export function isLoopbackAddress(addr: string | undefined): boolean {
+  if (!addr) return false;
+  const a = addr.replace(/^::ffff:/i, '');
+  return a === '::1' || /^127\./.test(a);
+}
+
+/**
+ * Cabeçalhos que proxies e túneis (nginx, Caddy, ngrok, cloudflared, Tailscale, o portless...) acrescentam. Um proxy
+ * no próprio computador conecta pelo loopback e pode repassar `Host: localhost`: com qualquer um destes, a requisição
+ * não vale como local, venha de onde vier.
+ */
+const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via', 'cf-connecting-ip', 'true-client-ip'];
+
+export function hasProxyHeaders(req: IncomingMessage): boolean {
+  return PROXY_HEADERS.some((h) => req.headers[h] !== undefined);
+}
+
+/** Diz se o endereço de quem conectou é o próprio computador (ver localPeerCheck). */
+export type PeerCheck = (addr: string | undefined) => boolean;
+
+/**
+ * Gateways das rotas padrão de /proc/net/route (IPv4, em hexadecimal little-endian): no Docker, a porta publicada
+ * chega ao container com o endereço do gateway da rede; outro container da mesma rede chega com o próprio IP.
+ */
+export function defaultGateways(routeTable: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of routeTable.split('\n').slice(1)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 3 || cols[1] !== '00000000' || !/^[0-9a-f]{8}$/i.test(cols[2])) continue;
+    const n = parseInt(cols[2], 16);
+    if (!n) continue;
+    out.add([n & 255, (n >>> 8) & 255, (n >>> 16) & 255, n >>> 24].join('.'));
+  }
+  return out;
+}
+
+/**
+ * Quem conta como "o próprio computador": fora do Docker, o loopback; no Docker, só o gateway da rede do container
+ * (a porta publicada no host). Sem conseguir ler o gateway, ninguém conta (as travas ficam fechadas).
+ */
+export function localPeerCheck(inDocker: boolean, readRoutes: () => string): PeerCheck {
+  if (!inDocker) return isLoopbackAddress;
+  let gateways: Set<string>;
+  try {
+    gateways = defaultGateways(readRoutes());
+  } catch {
+    gateways = new Set();
+  }
+  return (addr) => !!addr && gateways.has(addr.replace(/^::ffff:/i, ''));
+}
+
+/**
+ * A trava "pelo próprio computador" (terminal, permissões, mensagens, agentes novos, World...): Host local, nenhum
+ * cabeçalho de proxy e a conexão vinda do próprio computador. O Host sozinho qualquer cliente HTTP imita.
+ */
+export function isLocalRequest(req: IncomingMessage, peer: PeerCheck): boolean {
+  return isLoopbackHost(req.headers.host) && !hasProxyHeaders(req) && peer(req.socket.remoteAddress);
 }
 
 /**

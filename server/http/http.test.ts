@@ -1,4 +1,4 @@
-import http from 'node:http';
+import http, { type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,7 +10,19 @@ import { NameStore } from '../model/names';
 import { Office, type OfficeDeps } from '../model/office';
 import { tempDir } from '../test/fixtures';
 import { createApiHandler, type ApiDeps } from './app';
-import { createRequestGuard, hostAllowed, hostnameOf, isLoopbackHost, originAllowed, parseAllowedHosts } from './guard';
+import {
+  createRequestGuard,
+  defaultGateways,
+  hasProxyHeaders,
+  hostAllowed,
+  hostnameOf,
+  isLocalRequest,
+  isLoopbackAddress,
+  isLoopbackHost,
+  localPeerCheck,
+  originAllowed,
+  parseAllowedHosts,
+} from './guard';
 import { Hub } from './sse';
 import { createStaticHandler, IMMUTABLE, REVALIDATE } from './static';
 
@@ -332,6 +344,13 @@ describe('personagem do projeto (PUT/DELETE /api/agents/:id/character)', () => {
     });
     expect(r.status).toBe(403);
     expect(r.body).toMatch(/próprio computador/);
+    // Proxy ou túnel no próprio computador repassando Host: localhost: também não.
+    const proxied = await raw(env.base, `/api/agents/${encodeURIComponent('.claude:1')}/character`, {
+      method: 'PUT',
+      headers: { ...JSON_HEADERS, Host: `localhost:${port}`, 'X-Forwarded-For': '203.0.113.7' },
+      body: JSON.stringify({ name: 'Ana', seed: 1, parts: {} }),
+    });
+    expect(proxied.status).toBe(403);
     const get = await fetch(url());
     expect(get.status).toBe(405);
     expect(get.headers.get('allow')).toBe('PUT, DELETE');
@@ -420,11 +439,49 @@ describe('guarda de Host/Origin', () => {
     for (const h of ['attacker.example:4747', 'localhost.attacker.example', '127.0.0.1.nip.io', '', 'x y']) expect(hostAllowed(h, allowed)).toBe(false);
   });
 
-  it('isLoopbackHost: só localhost, *.localhost, 127.x e ::1 (terminal)', () => {
-    for (const h of ['localhost:4747', 'LOCALHOST', 'app.localhost:1', '127.0.0.1:4747', '127.8.9.10', '[::1]:4747']) expect(isLoopbackHost(h)).toBe(true);
-    for (const h of [undefined, '', '10.0.0.5:4747', '192.168.0.10', '0.0.0.0:4747', 'habblaud.lan', 'meu-mac.local:4747', '[::]:4747', 'localhost.attacker.example', '127.0.0.1.nip.io', 'x y']) {
+  it('isLoopbackHost: só localhost, 127.x e ::1 (terminal); *.localhost não (DNS rebinding)', () => {
+    for (const h of ['localhost:4747', 'LOCALHOST', 'localhost.:1', '127.0.0.1:4747', '127.8.9.10', '[::1]:4747']) expect(isLoopbackHost(h)).toBe(true);
+    for (const h of [undefined, '', 'app.localhost:1', 'habblaud.localhost', '10.0.0.5:4747', '192.168.0.10', '0.0.0.0:4747', 'habblaud.lan', 'meu-mac.local:4747', '[::]:4747', 'localhost.attacker.example', '127.0.0.1.nip.io', 'x y']) {
       expect(isLoopbackHost(h)).toBe(false);
     }
+  });
+
+  const fakeReq = (headers: Record<string, string>, remoteAddress?: string) => ({ headers, socket: { remoteAddress } }) as unknown as IncomingMessage;
+
+  it('isLocalRequest: Host local, sem cabeçalho de proxy e conexão do próprio computador', () => {
+    const local = { host: 'localhost:4747' };
+    expect(isLocalRequest(fakeReq(local, '127.0.0.1'), isLoopbackAddress)).toBe(true);
+    expect(isLocalRequest(fakeReq(local, '::ffff:127.0.0.1'), isLoopbackAddress)).toBe(true);
+    // Host imitado por um cliente da rede.
+    expect(isLocalRequest(fakeReq(local, '192.168.0.20'), isLoopbackAddress)).toBe(false);
+    // Proxy ou túnel no próprio computador (conecta pelo loopback e repassa o Host).
+    for (const h of ['x-forwarded-for', 'forwarded', 'x-forwarded-host', 'x-real-ip', 'via', 'cf-connecting-ip']) {
+      expect(hasProxyHeaders(fakeReq({ ...local, [h]: '1.2.3.4' }))).toBe(true);
+      expect(isLocalRequest(fakeReq({ ...local, [h]: '1.2.3.4' }, '127.0.0.1'), isLoopbackAddress)).toBe(false);
+    }
+    expect(isLocalRequest(fakeReq({ host: 'habblaud.localhost' }, '127.0.0.1'), isLoopbackAddress)).toBe(false);
+  });
+
+  it('Docker: só o gateway da rede do container (a porta publicada) conta como o próprio computador', () => {
+    const routes = [
+      'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+      'eth0\t00000000\t010014AC\t0003\t0\t0\t0\t00000000\t0\t0\t0',
+      'eth0\t000014AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0',
+    ].join('\n');
+    expect([...defaultGateways(routes)]).toEqual(['172.20.0.1']);
+    const peer = localPeerCheck(true, () => routes);
+    expect(peer('172.20.0.1')).toBe(true);
+    expect(peer('::ffff:172.20.0.1')).toBe(true);
+    // Outro container da mesma rede, o próprio container e quem não tem endereço: não.
+    for (const a of ['172.20.0.3', '127.0.0.1', undefined]) expect(peer(a)).toBe(false);
+    // Sem conseguir ler as rotas: ninguém (as travas ficam fechadas).
+    const none = localPeerCheck(true, () => {
+      throw new Error('sem /proc');
+    });
+    expect(none('172.20.0.1')).toBe(false);
+    // Fora do Docker: o loopback.
+    expect(localPeerCheck(false, () => routes)('127.0.0.1')).toBe(true);
+    expect(localPeerCheck(false, () => routes)('172.20.0.1')).toBe(false);
   });
 
   it('Origin: ausente, mesma origem ou local', () => {

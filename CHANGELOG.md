@@ -10,6 +10,18 @@ do meio (0.**3**.0).
 
 ## [Não lançado]
 
+### Segurança
+
+- **O que age sobre as sessões só vale vindo de fato do próprio computador.** O terminal, responder pedidos de
+  permissão, as mensagens, o Novo agente, as entregas, o personagem, renomear salas e o Habblaud World conferiam só o
+  cabeçalho `Host: localhost`, que qualquer cliente HTTP imita. Agora também é preciso que a conexão venha do próprio
+  computador (no Docker, só do gateway da rede do container, por onde chega a porta publicada: outro container da
+  mesma rede não passa mais) e que não traga cabeçalhos de proxy (`X-Forwarded-For`, `Forwarded`, `Via`...), para um
+  túnel ou proxy apontado para a porta local não abrir tudo isso para a rede. `*.localhost` continua abrindo o
+  escritório, mas não dá mais esse acesso: use `http://localhost`.
+- **Windows: abrir o app do Claude pelo Novo agente não passa mais pelo `cmd.exe`.** O `cmd /c start` cortava o link
+  no `&` e tentava rodar o resto como comandos; agora o link vai inteiro para o tratador de protocolos do Windows.
+
 ## [1.0.3] - 2026-10-16
 
 ### Corrigido

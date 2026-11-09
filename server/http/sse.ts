@@ -4,7 +4,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { OfficeSnapshot } from '../../shared/types';
 import type { Office } from '../model/office';
-import { isLoopbackHost } from './guard';
+import { isLocalRequest, isLoopbackAddress } from './guard';
 
 /** Cliente lento demais (buffer acumulado acima disto) é desconectado; o EventSource reconecta. */
 const MAX_BUFFERED = 8 * 1024 * 1024;
@@ -20,7 +20,7 @@ export class Hub {
   private snapshotCbs = new Set<(snap: OfficeSnapshot) => void>();
   private readonly throttleMs: number;
   private readonly pingMs: number;
-  /** Quem pode responder pelo escritório; padrão: Host local. A porta remota (http/remote.ts) troca a regra. */
+  /** Quem pode responder pelo escritório; padrão: pedido local (guard.ts, isLocalRequest). A porta remota (http/remote.ts) troca a regra. */
   private readonly canAnswer: (req: IncomingMessage) => boolean;
 
   constructor(
@@ -29,7 +29,7 @@ export class Hub {
   ) {
     this.throttleMs = opts.throttleMs ?? 200;
     this.pingMs = opts.pingMs ?? 15_000;
-    this.canAnswer = opts.canAnswer ?? ((req) => isLoopbackHost(req.headers.host));
+    this.canAnswer = opts.canAnswer ?? ((req) => isLocalRequest(req, isLoopbackAddress));
   }
 
   start(): void {

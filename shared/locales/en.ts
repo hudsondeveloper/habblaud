@@ -1711,6 +1711,7 @@ export const EN: Readonly<Record<string, string>> = {
   "Erro no servidor HTTP: {0}": "HTTP server error: {0}",
   "🏢 Habblaud {0}{1}{2} em http://{3}:{4}": "🏢 Habblaud {0}{1}{2} at http://{3}:{4}",
   "Nenhuma pasta do Claude Code encontrada (defina HABBLAUD_CLAUDE_DIRS).": "No Claude Code folder found (set HABBLAUD_CLAUDE_DIRS).",
+  "Não consegui ler o gateway do container em /proc/net/route: o terminal, as permissões e as mensagens ficam travados.": "Could not read the container gateway from /proc/net/route: the terminal, permissions and messages stay locked.",
   "{0} é uma pasta do Codex, não do Claude Code: fica fora das contas do Claude Code.": "{0} is a Codex folder, not a Claude Code one: it stays out of the Claude Code accounts.",
   "   Conta {0} ({1}): {2} sessão(ões) aberta(s) · uso: {3} · {4}": "   Account {0} ({1}): {2} open session(s) · usage: {3} · {4}",
   "   Codex: {0} conta(s), {1} sessão(ões) aberta(s).": "   Codex: {0} account(s), {1} open session(s).",

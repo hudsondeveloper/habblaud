@@ -136,8 +136,19 @@ O recurso só existe com **bind local** (`config.ts`, `terminalOffReason`), já 
   qualquer outra desliga;
 - `HABBLAUD_TERMINAL=0` desliga sempre; nenhuma variável liga o terminal com a porta exposta.
 
-Além disso, cada requisição precisa de `Host` local (`localhost`, `*.localhost`, 127.x ou `[::1]`): IPs da rede e
-nomes de `HABBLAUD_ALLOWED_HOSTS` (proxies, túneis) recebem 403. O estado sai em `meta.terminal` do snapshot e em
+Além disso, cada requisição precisa vir do próprio computador (`isLocalRequest` em `http/guard.ts`), a mesma trava
+das permissões, das mensagens, do Novo agente, das entregas, do personagem e do Habblaud World:
+
+- `Host` local exato (`localhost`, 127.x ou `[::1]`): IPs da rede, `*.localhost` (um DNS hostil o religaria) e nomes
+  de `HABBLAUD_ALLOWED_HOSTS` recebem 403;
+- nenhum cabeçalho de proxy (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, `CF-Connecting-IP`...): um proxy ou
+  túnel no próprio computador (ngrok, cloudflared, `tailscale serve`, `ssh -R`, nginx) conecta pelo loopback e pode
+  repassar `Host: localhost`;
+- a conexão vinda do próprio computador: fora do Docker, o loopback; no Docker, só o gateway da rede do container
+  (lido de `/proc/net/route`), por onde chega a porta publicada no host. Outro container da mesma rede chega com o
+  próprio IP e recebe 403; sem conseguir ler o gateway, tudo fica travado.
+
+O estado sai em `meta.terminal` do snapshot e em
 `terminal` no `/api/health`. Erros antes do stream respondem JSON `{error}`: 403 (desligado ou acesso que não é
 local), 404 (agente ou transcript desconhecido), 405 (método que não é `GET`), 429 (terminais demais) e 500
 (transcript ilegível).
